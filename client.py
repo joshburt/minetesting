@@ -6,6 +6,7 @@ http://dev.minetest.net/Network_Protocol
 and
 https://github.com/minetest/minetest/blob/master/src/clientserver.h
 """
+import logging
 import socket
 from struct import pack, unpack, calcsize
 from binascii import hexlify
@@ -15,15 +16,19 @@ from collections import defaultdict
 import math
 
 # Packet types.
-CONTROL = 0x00
-ORIGINAL = 0x01
-SPLIT = 0x02
-RELIABLE = 0x03
+TYPE_CONTROL = 0x00
+TYPE_ORIGINAL = 0x01
+ORIGINAL_HEADER_SIZE = 0x01
+TYPE_SPLIT = 0x02
+TYPE_RELIABLE = 0x03
+RELIABLE_HEADER_SIZE = 0x03
 
 # Types of CONTROL packets.
 CONTROLTYPE_ACK = 0x00
 CONTROLTYPE_SET_PEER_ID = 0x01
 CONTROLTYPE_PING = 0x02
+CONTROLTYPE_DISCO = 0x03
+CONTROLTYPE_ENABLE_BIG_SEND_WINDOW = 0x04
 
 # Initial sequence number for RELIABLE-type packets.
 SEQNUM_INITIAL = 0xFFDC
@@ -31,43 +36,92 @@ SEQNUM_INITIAL = 0xFFDC
 # Protocol id.
 PROTOCOL_ID = 0x4F457403
 
-# No idea.
+# Highest supported serialization version
+#define SER_FMT_VER_HIGHEST_READ 26
 SER_FMT_VER_HIGHEST_READ = 0x1A
 
+# Supported compresion modes (none currently)
+NETPROTO_COMPRESSION_NONE = 0x00
+
 # Supported protocol versions lifted from official client.
-MIN_SUPPORTED_PROTOCOL = 0x0d
-MAX_SUPPORTED_PROTOCOL = 0x16
+CLIENT_PROTOCOL_VERSION_MIN = 0x0d
+CLIENT_PROTOCOL_VERSION_MAX = 0x1a
 
 # Client -> Server command ids.
-TOSERVER_INIT = 0x10
+TOSERVER_INIT = 0x02
+TOSERVER_INIT_LEGACY = 0x10
 TOSERVER_INIT2 = 0x11
 TOSERVER_PLAYERPOS = 0x23
+TOSERVER_GOTBLOCKS = 0x24
+TOSERVER_DELETEDBLOCKS = 0x25
+TOSERVER_INVENTORY_ACTION = 0x31
 TOSERVER_CHAT_MESSAGE = 0x32
-TOSERVER_RESPAWN = 0x38
 TOSERVER_DAMAGE = 0x35
+TOSERVER_PASSWORD_LEGACY = 0x36
+TOSERVER_PLAYERITEM = 0x37
+TOSERVER_RESPAWN = 0x38
+TOSERVER_INTERACT = 0x39
+TOSERVER_REMOVED_SOUNDS = 0x3a
+TOSERVER_NODEMETA_FIELDS = 0x3b
+TOSERVER_INVENTORY_FIELDS = 0x3c
+TOSERVER_REQUEST_MEDIA = 0x40
+TOSERVER_RECEIVED_MEDIA = 0x41
+TOSERVER_BREATH = 0x42
+TOSERVER_CLIENT_READY = 0x43
+TOSERVER_FIRST_SRP = 0x50
+TOSERVER_SRP_BYTES_A = 0x51
+TOSERVER_SRP_BYTES_M = 0x52
+TOSERVER_NUM_MSG_TYPES = 0x53
+
 
 # Server -> Client command ids.
-TOCLIENT_INIT = 0x10
+TOCLIENT_HELLO = 0x02
+TOCLIENT_AUTH_ACCEPT = 0x03
+TOCLIENT_ACCEPT_SUDO_MODE = 0x04
+TOCLIENT_DENY_SUDO_MODE = 0x05
+TOCLIENT_INIT_LEGACY = 0x10
+TOCLIENT_ACCESS_DENIED = 0x0A
+TOCLIENT_BLOCKDATA = 0x20   # TODO: Multiple blocks
 TOCLIENT_ADDNODE = 0x21
 TOCLIENT_REMOVENODE = 0x22
 TOCLIENT_INVENTORY = 0x27
 TOCLIENT_TIME_OF_DAY = 0x29
 TOCLIENT_CHAT_MESSAGE = 0x30
+TOCLIENT_ACTIVE_OBJECT_REMOVE_ADD = 0x31
+TOCLIENT_ACTIVE_OBJECT_MESSAGES = 0x32
 TOCLIENT_HP = 0x33
 TOCLIENT_MOVE_PLAYER = 0x34
-TOCLIENT_ACCESS_DENIED = 0x35
+TOCLIENT_ACCESS_DENIED_LEGACY = 0x35
 TOCLIENT_DEATHSCREEN = 0x37
+TOCLIENT_MEDIA = 0x38
+TOCLIENT_TOOLDEF = 0x39
 TOCLIENT_NODEDEF = 0x3a
+TOCLIENT_CRAFTITEMDEF = 0x3b
 TOCLIENT_ANNOUNCE_MEDIA = 0x3c
 TOCLIENT_ITEMDEF = 0x3d
-TOCLIENT_PLAY_SOUND = 0x3F
+TOCLIENT_PLAY_SOUND = 0x3f
 TOCLIENT_STOP_SOUND = 0x40
 TOCLIENT_PRIVILEGES = 0x41
 TOCLIENT_INVENTORY_FORMSPEC = 0x42
 TOCLIENT_DETACHED_INVENTORY = 0x43
+TOCLIENT_SHOW_FORMSPEC = 0x44
 TOCLIENT_MOVEMENT = 0x45
+TOCLIENT_SPAWN_PARTICLE = 0x46
 TOCLIENT_ADD_PARTICLESPAWNER = 0x47
+TOCLIENT_DELETE_PARTICLESPAWNER_LEGACY = 0x48
+TOCLIENT_HUDADD = 0x49
+TOCLIENT_HUDRM = 0x4a
+TOCLIENT_HUDCHANGE = 0x4b
+TOCLIENT_HUD_SET_FLAGS = 0x4c
+TOCLIENT_HUD_SET_PARAM = 0x4d
 TOCLIENT_BREATH = 0x4e
+TOCLIENT_SET_SKY = 0x4f
+TOCLIENT_OVERRIDE_DAY_NIGHT_RATIO = 0x50
+TOCLIENT_LOCAL_PLAYER_ANIMATIONS = 0x51
+TOCLIENT_EYE_OFFSET = 0x52
+TOCLIENT_DELETE_PARTICLESPAWNER = 0x53
+TOCLIENT_SRP_BYTES_S_B = 0x60
+TOCLIENT_NUM_MSG_TYPES = 0x61
 
 
 class MinetestClientProtocol(object):
@@ -79,6 +133,7 @@ class MinetestClientProtocol(object):
     TODO: resend unacknowledged messages and process out-of-order packets.
     """
     def __init__(self, host, username, password=''):
+        logging.debug('MinetestClientProtocol::__init__')
         if ':' in host:
             host, port = host.split(':')
             server = (host, int(port))
@@ -104,68 +159,87 @@ class MinetestClientProtocol(object):
 
         # Send TOSERVER_INIT and start a reliable connection. The order is
         # strange, but imitates the official client.
+        logging.debug('MinetestClientProtocol::calling _handshake_start()')
         self._handshake_start()
+        logging.debug('MinetestClientProtocol::calling _start_reliable_connection()')
         self._start_reliable_connection()
 
         # Lock until the handshake is completed.
         self.handshake_lock = Semaphore(0)
         # Run listen-and-process asynchronously.
+        logging.debug('MinetestClientProtocol::creating our listening thread ..')
         thread = Thread(target=self._receive_and_process)
         thread.daemon = True
         thread.start()
+        logging.debug('self.handshake_lock.acquire()..')
         self.handshake_lock.acquire()
 
     def _send(self, packet):
+        logging.debug('MinetestClientProtocol::_send() ..')
         """ Sends a raw packet, containing only the protocol header. """
         header = pack('>IHB', PROTOCOL_ID, self.peer_id, self.channel)
         self.sock.sendto(header + packet, self.server)
 
     def _handshake_start(self):
+        logging.debug('MinetestClientProtocol::_handshake_start() ..')
         """ Sends the first part of the handshake. """
-        packet = pack('>HB20s28sHH',
-                TOSERVER_INIT, SER_FMT_VER_HIGHEST_READ,
-                self.username.encode('utf-8'), self.password.encode('utf-8'),
-                MIN_SUPPORTED_PROTOCOL, MAX_SUPPORTED_PROTOCOL)
+        packet = pack('>HHBHHH20s',
+                TOSERVER_INIT, 
+                1 + 2 + 2 + (1 + len(self.username)),
+                SER_FMT_VER_HIGHEST_READ,
+                NETPROTO_COMPRESSION_NONE,
+                CLIENT_PROTOCOL_VERSION_MIN,
+                CLIENT_PROTOCOL_VERSION_MAX,
+                self.username.encode('utf-8'))
         self.send_command(packet)
 
     def _handshake_end(self):
+        logging.debug('MinetestClientProtocol::_handshake_end() ..')
         """ Sends the second and last part of the handshake. """
-        self.send_command(pack('>H', TOSERVER_INIT2))
+        self.send_command(pack('>H', CONTROLTYPE_DISCO))
 
     def _start_reliable_connection(self):
+        logging.debug('MinetestClientProtocol::_start_reliable_connection() ..')
         """ Starts a reliable connection by sending an empty reliable packet. """
         self.send_command(b'')
 
     def disconnect(self):
+        logging.debug('MinetestClientProtocol::disconnect()..')
         """ Closes the connection. """
         # The "disconnect" message is just a RELIABLE without sequence number.
-        self._send(pack('>H', RELIABLE))
+        self._send(pack('>H', TYPE_RELIABLE))
 
     def _send_reliable(self, message):
+        logging.debug('MinetestClientProtocol::_send_reliable() ..')
         """
         Sends a reliable message. This message can be a packet of another
         type, such as CONTROL or ORIGINAL.
         """
-        packet = pack('>BH', RELIABLE, self.seqnum & 0xFFFF) + message
+        packet = pack('>BH', TYPE_RELIABLE, self.seqnum & 0xFFFF) + message
         self.seqnum += 1
         self._send(packet)
 
     def send_command(self, message):
+        logging.debug('MinetestClientProtocol::send_command() ..')
         """ Sends a useful message, such as a place or say command. """
-        start = pack('B', ORIGINAL)
+        start = pack('B', TYPE_ORIGINAL)
         self._send_reliable(start + message)
 
     def _ack(self, seqnum):
+        logging.debug('MinetestClientProtocol::_ack() ..')
         """ Sends an ack for the given sequence number. """
-        self._send(pack('>BBH', CONTROL, CONTROLTYPE_ACK, seqnum))
+        self._send(pack('>BBH', TYPE_CONTROL, CONTROLTYPE_ACK, seqnum))
 
     def receive_command(self):
+        logging.debug('MinetestClientProtocol::receive_command() ..')
         """
         Returns a command message from the server, blocking until one arrives.
         """
         return self.receive_buffer.get()
 
     def _process_packet(self, packet):
+        logging.debug('MinetestClientProtocol::_process_packet() ..')
+	
         """
         Processes a packet received. It can be of type
         - CONTROL, used by the protocol to control the connection
@@ -178,7 +252,7 @@ class MinetestClientProtocol(object):
         """
         packet_type, data = packet[0], packet[1:]
 
-        if packet_type == CONTROL:
+        if packet_type == TYPE_CONTROL:
             if len(data) == 1:
                 assert data[0] == CONTROLTYPE_PING
                 # Do nothing. PING is sent through a reliable packet, so the
@@ -192,13 +266,13 @@ class MinetestClientProtocol(object):
                 self.peer_id = value
                 self._handshake_end()
                 self.handshake_lock.release()
-        elif packet_type == RELIABLE:
+        elif packet_type == TYPE_RELIABLE:
             seqnum, = unpack('>H', data[:2])
             self._ack(seqnum)
             self._process_packet(data[2:])
-        elif packet_type == ORIGINAL:
+        elif packet_type == TYPE_ORIGINAL:
             self.receive_buffer.put(data)
-        elif packet_type == SPLIT:
+        elif packet_type == TYPE_SPLIT:
             header_size = calcsize('>HHH')
             split_header, split_data = data[:header_size], data[header_size:]
             seqnumber, chunk_count, chunk_num = unpack('>HHH', split_header)
@@ -216,13 +290,12 @@ class MinetestClientProtocol(object):
         else:
             raise ValueError('Unknown packet type {}'.format(packet_type))
 
-
-
     def _receive_and_process(self):
         """
         Constantly listens for incoming packets and processes them as required.
         """
         while True:
+            logging.debug('MinetestClientProtocol::_receive_and_process listing..')
             packet, origin = self.sock.recvfrom(1024)
             header_size = calcsize('>IHB')
             header, data = packet[:header_size], packet[header_size:]
@@ -239,6 +312,7 @@ class MinetestClient(object):
     class.
     """
     def __init__(self, server='localhost:30000', username='user', password='', on_message=id):
+        logging.debug('MinetestClient::__init__')
         """
         Creates a new Minetest Client to send remote commands.
 
@@ -247,6 +321,7 @@ class MinetestClient(object):
         'password' is an optional value used when the server is private.
         'on_message' is a function called whenever a chat message arrives.
         """
+        logging.debug('MinetestClient::Calling connection factory ..')
         self.protocol = MinetestClientProtocol(server, username, password)
 
         # We need to constantly listen for server messages to update our
@@ -260,6 +335,7 @@ class MinetestClient(object):
         thread.start()
         # Wait until we know our position, otherwise the 'move' method will not
         # work.
+        logging.debug('self.init_lock.acquire() ..')
         self.init_lock.acquire()
 
         if self.access_denied is not None:
@@ -343,7 +419,7 @@ class MinetestClient(object):
             packet = self.protocol.receive_command()
             (command_type,), data = unpack('>H', packet[:2]), packet[2:]
 
-            if command_type == TOCLIENT_INIT:
+            if command_type == TOCLIENT_INIT_LEGACY:
                 # No useful info here.
                 pass
             elif command_type == TOCLIENT_MOVE_PLAYER:
@@ -389,7 +465,7 @@ class MinetestClient(object):
                 pass
             elif command_type == TOCLIENT_ITEMDEF:
                 pass
-            elif command_type == TOCLIENT_ACCESS_DENIED:
+            elif command_type == TOCLIENT_ACCESS_DENIED_LEGACY:
                 length, bin_message = unpack('>H', data[:2]), data[2:]
                 self.access_denied = bin_message.decode('UTF-16BE')
                 self.init_lock.release()
@@ -397,7 +473,9 @@ class MinetestClient(object):
                 print('Unknown command type {}.'.format(hex(command_type)))
 
 
-if __name__ == '__main__':
+def main():
+    logging.basicConfig(filename='client.log', level=logging.DEBUG)
+    
     import sys
     import time
 
@@ -406,7 +484,9 @@ if __name__ == '__main__':
     # Load hostname, username and password from the command line arguments.
     # Defaults to localhost:30000, 'user' and empty password (for public
     # servers).
+    logging.debug('Creating client object ..')
     client = MinetestClient(*args)
+    logging.debug('Entering main loop ..')
     try:
         # Print chat messages received from other players.
         client.on_message = print
@@ -415,4 +495,12 @@ if __name__ == '__main__':
             line = sys.stdin.readline().rstrip()
             client.say(line)
     finally:
+        logging.debug('Main loop exited, disconnecting ..')
         client.protocol.disconnect()
+        
+
+if __name__ == '__main__':
+    main()
+
+
+
