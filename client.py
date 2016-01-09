@@ -474,8 +474,7 @@ class MinetestClient(object):
 
 
 def main():
-    logging.basicConfig(filename='client.log', level=logging.DEBUG)
-    
+    logging.basicConfig(format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p', filename='client.log', level=logging.DEBUG)
     import sys
     import time
 
