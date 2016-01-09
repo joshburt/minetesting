@@ -133,7 +133,7 @@ class MinetestClientProtocol(object):
     TODO: resend unacknowledged messages and process out-of-order packets.
     """
     def __init__(self, host, username, password=''):
-        logging.debug('MinetestClientProtocol::__init__')
+        logging.debug('[MinetestClientProtocol::__init__]')
         if ':' in host:
             host, port = host.split(':')
             server = (host, int(port))
@@ -159,29 +159,29 @@ class MinetestClientProtocol(object):
 
         # Send TOSERVER_INIT and start a reliable connection. The order is
         # strange, but imitates the official client.
-        logging.debug('MinetestClientProtocol::calling _handshake_start()')
+        logging.debug('[MinetestClientProtocol::__init__] calling _handshake_start()')
         self._handshake_start()
-        logging.debug('MinetestClientProtocol::calling _start_reliable_connection()')
+        logging.debug('[MinetestClientProtocol::__init__] calling _start_reliable_connection()')
         self._start_reliable_connection()
 
         # Lock until the handshake is completed.
         self.handshake_lock = Semaphore(0)
         # Run listen-and-process asynchronously.
-        logging.debug('MinetestClientProtocol::creating our listening thread ..')
+        logging.debug('[MinetestClientProtocol::__init__] creating our listening thread ..')
         thread = Thread(target=self._receive_and_process)
         thread.daemon = True
         thread.start()
-        logging.debug('self.handshake_lock.acquire()..')
+        logging.debug('[MinetestClientProtocol::__init__] calling self.handshake_lock.acquire()..')
         self.handshake_lock.acquire()
 
     def _send(self, packet):
-        logging.debug('MinetestClientProtocol::_send() ..')
+        logging.debug('[MinetestClientProtocol::_send]')
         """ Sends a raw packet, containing only the protocol header. """
         header = pack('>IHB', PROTOCOL_ID, self.peer_id, self.channel)
         self.sock.sendto(header + packet, self.server)
 
     def _handshake_start(self):
-        logging.debug('MinetestClientProtocol::_handshake_start() ..')
+        logging.debug('[MinetestClientProtocol::_handshake_start]')
         """ Sends the first part of the handshake. """
         packet = pack('>HHBHHH20s',
                 TOSERVER_INIT, 
@@ -194,24 +194,24 @@ class MinetestClientProtocol(object):
         self.send_command(packet)
 
     def _handshake_end(self):
-        logging.debug('MinetestClientProtocol::_handshake_end() ..')
+        logging.debug('[MinetestClientProtocol::_handshake_end]')
         """ Sends the second and last part of the handshake. """
         self.send_command(pack('>H', TOSERVER_INIT2))
 
     def _start_reliable_connection(self):
-        logging.debug('MinetestClientProtocol::_start_reliable_connection() ..')
+        logging.debug('[MinetestClientProtocol::_start_reliable_connection]')
         """ Starts a reliable connection by sending an empty reliable packet. """
         self.send_command(b'')
 
     def disconnect(self):
-        logging.debug('MinetestClientProtocol::disconnect()..')
+        logging.debug('[MinetestClientProtocol::disconnect]')
         """ Closes the connection. """
         self.send_command(pack('>H', CONTROLTYPE_DISCO))
         # The "disconnect" message is just a RELIABLE without sequence number.
         #self._send(pack('>H', TYPE_RELIABLE))
 
     def _send_reliable(self, message):
-        logging.debug('MinetestClientProtocol::_send_reliable() ..')
+        logging.debug('[MinetestClientProtocol::_send_reliable]')
         """
         Sends a reliable message. This message can be a packet of another
         type, such as CONTROL or ORIGINAL.
@@ -221,25 +221,25 @@ class MinetestClientProtocol(object):
         self._send(packet)
 
     def send_command(self, message):
-        logging.debug('MinetestClientProtocol::send_command() ..')
+        logging.debug('[MinetestClientProtocol::send_command]')
         """ Sends a useful message, such as a place or say command. """
         start = pack('B', TYPE_ORIGINAL)
         self._send_reliable(start + message)
 
     def _ack(self, seqnum):
-        logging.debug('MinetestClientProtocol::_ack() ..')
+        logging.debug('[MinetestClientProtocol::_ack]')
         """ Sends an ack for the given sequence number. """
         self._send(pack('>BBH', TYPE_CONTROL, CONTROLTYPE_ACK, seqnum))
 
     def receive_command(self):
-        logging.debug('MinetestClientProtocol::receive_command() ..')
+        logging.debug('[MinetestClientProtocol::receive_command]')
         """
         Returns a command message from the server, blocking until one arrives.
         """
         return self.receive_buffer.get()
 
     def _process_packet(self, packet):
-        logging.debug('MinetestClientProtocol::_process_packet() ..')
+        logging.debug('[MinetestClientProtocol::_process_packet]')
 	
         """
         Processes a packet received. It can be of type
@@ -296,7 +296,7 @@ class MinetestClientProtocol(object):
         Constantly listens for incoming packets and processes them as required.
         """
         while True:
-            logging.debug('MinetestClientProtocol::_receive_and_process listing..')
+            logging.debug('[MinetestClientProtocol::_receive_and_process]')
             packet, origin = self.sock.recvfrom(1024)
             header_size = calcsize('>IHB')
             header, data = packet[:header_size], packet[header_size:]
@@ -313,7 +313,7 @@ class MinetestClient(object):
     class.
     """
     def __init__(self, server='localhost:30000', username='user', password='', on_message=id):
-        logging.debug('MinetestClient::__init__')
+        logging.debug('[MinetestClient::__init__]')
         """
         Creates a new Minetest Client to send remote commands.
 
@@ -322,7 +322,7 @@ class MinetestClient(object):
         'password' is an optional value used when the server is private.
         'on_message' is a function called whenever a chat message arrives.
         """
-        logging.debug('MinetestClient::Calling connection factory ..')
+        logging.debug('[MinetestClient::__init__] Calling connection factory ..')
         self.protocol = MinetestClientProtocol(server, username, password)
 
         # We need to constantly listen for server messages to update our
@@ -336,10 +336,12 @@ class MinetestClient(object):
         thread.start()
         # Wait until we know our position, otherwise the 'move' method will not
         # work.
-        logging.debug('self.init_lock.acquire() ..')
+        logging.debug('[MinetestClient::__init__] calling self.init_lock.acquire() ..')
         self.init_lock.acquire()
 
         if self.access_denied is not None:
+            logging.error('[MinetestClient::__init__] Failures here appear to be related to legacy/bad protocol failures with the remote server.')
+            logging.error('[MinetestClient::__init__] Access denied. Reason: ' + self.access_denied)
             raise ValueError('Access denied. Reason: ' + self.access_denied)
 
         self.on_message = on_message
@@ -484,9 +486,9 @@ def main():
     # Load hostname, username and password from the command line arguments.
     # Defaults to localhost:30000, 'user' and empty password (for public
     # servers).
-    logging.debug('Creating client object ..')
+    logging.debug('[main] Creating client object ..')
     client = MinetestClient(*args)
-    logging.debug('Entering main loop ..')
+    logging.debug('[main] Entering main loop ..')
     try:
         # Print chat messages received from other players.
         client.on_message = print
@@ -495,7 +497,7 @@ def main():
             line = sys.stdin.readline().rstrip()
             client.say(line)
     finally:
-        logging.debug('Main loop exited, disconnecting ..')
+        logging.debug('[main] Main loop exited, disconnecting ..')
         client.protocol.disconnect()
         
 
