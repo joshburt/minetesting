@@ -196,7 +196,7 @@ class MinetestClientProtocol(object):
     def _handshake_end(self):
         logging.debug('MinetestClientProtocol::_handshake_end() ..')
         """ Sends the second and last part of the handshake. """
-        self.send_command(pack('>H', CONTROLTYPE_DISCO))
+        self.send_command(pack('>H', TOSERVER_INIT2))
 
     def _start_reliable_connection(self):
         logging.debug('MinetestClientProtocol::_start_reliable_connection() ..')
@@ -206,8 +206,9 @@ class MinetestClientProtocol(object):
     def disconnect(self):
         logging.debug('MinetestClientProtocol::disconnect()..')
         """ Closes the connection. """
+        self.send_command(pack('>H', CONTROLTYPE_DISCO))
         # The "disconnect" message is just a RELIABLE without sequence number.
-        self._send(pack('>H', TYPE_RELIABLE))
+        #self._send(pack('>H', TYPE_RELIABLE))
 
     def _send_reliable(self, message):
         logging.debug('MinetestClientProtocol::_send_reliable() ..')
